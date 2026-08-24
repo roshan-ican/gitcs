@@ -2,63 +2,79 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
+	"sort"
+
 	"github.com/go-git/go-git/v5"
-	"os"
 )
 
-func runMap() {
-	path, err := os.Getwd()
+// readWorkingTreeChanges keeps go-git's two-column status representation out
+// of the pure review-map transformation. A worktree change takes precedence
+// over a staged change because it describes the file currently on disk.
+func readWorkingTreeChanges(worktree *git.Worktree) ([]reviewChange, error) {
+	status, err := worktree.Status()
 	if err != nil {
-		fmt.Println("gitcs map: could not find the current folder")
-		return
-	}
-	// roshan: this means it will work even in the nested folders
-	repo, err := git.PlainOpenWithOptions(path, &git.PlainOpenOptions{DetectDotGit: true})
-	if err != nil {
-		fmt.Println("gitcs map: the current folder is not inside a Git repository")
-		return
+		return nil, fmt.Errorf("read Git working-tree status: %w", err)
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		fmt.Println("gitcs map: could not read the repository worktree")
-		return
+	paths := make([]string, 0, len(status))
+	for path := range status {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	changes := make([]reviewChange, 0, len(paths))
+	for _, path := range paths {
+		fileStatus := status[path]
+		code := fileStatus.Worktree
+		if code == git.Unmodified {
+			code = fileStatus.Staging
+		}
+
+		mapped, changed := mapGitStatus(code)
+		if !changed {
+			continue
+		}
+
+		changes = append(changes, reviewChange{
+			Path:   filepath.ToSlash(filepath.Clean(path)),
+			Status: mapped,
+		})
 	}
 
-	root := worktree.Filesystem.Root()
+	return changes, nil
+}
+
+func mapGitStatus(code git.StatusCode) (changeStatus, bool) {
+	switch code {
+	case git.Untracked, git.Added:
+		return changeAdded, true
+	case git.Modified, git.Copied, git.UpdatedButUnmerged:
+		return changeModified, true
+	case git.Deleted:
+		return changeDeleted, true
+	case git.Renamed:
+		return changeRenamed, true
+	default:
+		return "", false
+	}
+}
+
+func analyzeRepositoryGraph(root string) (*Graph, error) {
 	files, err := findSourceFiles(root)
 	if err != nil {
-		fmt.Println("gitcs map: could not scan the repository")
-		return
+		return nil, fmt.Errorf("could not scan the repository: %w", err)
 	}
 	graph, err := buildFileGraph(root, files)
 	if err != nil {
-		fmt.Println("gitcs map: could not build the project graph")
-		return
+		return nil, fmt.Errorf("could not build the project graph: %w", err)
 	}
 	goAnalyzer, err := NewGoAnalyzer(graph)
 	if err != nil {
-		fmt.Println("gitcs map: could not prepare the Go analyzer")
-		return
+		return nil, fmt.Errorf("could not prepare the Go analyzer: %w", err)
 	}
 	if err := applyAnalyzers(root, files, graph, []Analyzer{goAnalyzer}); err != nil {
-		fmt.Println("gitcs map: could not analyze project connections")
-		return
+		return nil, fmt.Errorf("could not analyze project connections: %w", err)
 	}
-
-	fmt.Printf("Map mode: scanning %s\n", root)
-	fmt.Printf("Built graph with %d cards and %d connections\n", len(graph.Nodes), len(graph.Edges))
-
-	reportPath, err := writeGraphHTML(graph)
-	if err != nil {
-		fmt.Println("gitcs map: could not create the browser view")
-		return
-	}
-
-	if err := openGraphInBrowser(reportPath); err != nil {
-		fmt.Printf("Browser view created at %s\n", reportPath)
-		return
-	}
-
-	fmt.Printf("Opened browser view: %s\n", reportPath)
+	return graph, nil
 }
