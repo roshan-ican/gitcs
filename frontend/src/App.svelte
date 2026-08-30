@@ -10,12 +10,14 @@
 
   let graph = null;
   let selectedId = '';
+  let selectedIds = [];
   let view = 'changes';
   let scope = 'all';
   let period = '30';
   let loading = true;
   let connected = false;
   let notice = '';
+  let inspectorOpen = true;
   let activityLog = [];
   const viewOptions = [
     { id: 'calls', label: 'What calls what' },
@@ -34,6 +36,11 @@
   ];
 
   $: selected = nodes.find((node) => node.id === selectedId)?.data ?? graph?.nodes.find((node) => node.id === selectedId);
+  $: selectedCards = selectedIds
+    .map((id) => nodes.find((node) => node.id === id)?.data ?? graph?.nodes.find((node) => node.id === id))
+    .filter(Boolean);
+  $: selectedChangeCount = selectedCards.filter((node) => node.change).length;
+  $: selectedCardsCommitCount = selectedCards.reduce((total, node) => total + activityCount(node.activity), 0);
   $: changedNodes = graph?.nodes.filter((node) => node.change) ?? [];
   $: otherChangeCount = graph?.otherChanges.length ?? 0;
   $: changedCount = changedNodes.length + otherChangeCount;
@@ -217,8 +224,9 @@
     }
 
     const result = [];
-    const horizontalGap = 320;
-    const verticalGap = 155;
+    const selectedSet = new Set(selectedIds);
+    const horizontalGap = 260;
+    const verticalGap = 128;
     for (const [depth, level] of [...nodesByDepth.entries()].sort(([left], [right]) => left - right)) {
       level.forEach((node, index) => {
         const isScopeNode = String(node.id).startsWith('__');
@@ -226,9 +234,10 @@
           id: node.id,
           type: 'code',
           data: node,
+          selected: selectedSet.has(node.id),
           position: previousPositions.get(node.id) ?? {
             x: isScopeNode ? 0 : (depth + 1) * horizontalGap,
-            y: isScopeNode ? (node.id === '__frontend__' ? 0 : 190) : index * verticalGap
+            y: isScopeNode ? (node.id === '__frontend__' ? 0 : 150) : index * verticalGap
           },
           ariaLabel: `${node.label}: ${node.description}`
         });
@@ -240,6 +249,16 @@
   function renderGraph(nextGraph = graph) {
     if (!nextGraph) return;
     const review = visibleGraph(nextGraph.nodes, nextGraph.edges);
+    const visibleIds = new Set(review.nodes.map((node) => node.id));
+    selectedIds = selectedIds.filter((id) => visibleIds.has(id));
+    if (selectedId && !visibleIds.has(selectedId)) selectedId = '';
+    if (!selectedId && selectedIds.length > 0) selectedId = selectedIds[0];
+    if (!selectedId && review.nodes.length > 0) {
+      selectedId = review.nodes.find((node) => node.change)?.id ?? review.nodes[0].id;
+    }
+    if (selectedId && !selectedIds.includes(selectedId)) {
+      selectedIds = uniqueIds([selectedId, ...selectedIds]);
+    }
     nodes = layoutNodes(review.nodes, review.edges);
     edges = review.edges.map((edge) => ({
       id: `${edge.from}:${edge.to}:${edge.kind}`,
@@ -247,14 +266,9 @@
       target: edge.to,
       type: 'bezier',
       interactionWidth: 28,
-      class: [
-        edge.kind === 'indirect' ? 'indirect-edge' : edge.kind === 'bridge' ? 'bridge-edge' : edge.kind === 'category' ? 'category-edge' : 'code-edge',
-        selectedId && (edge.from === selectedId || edge.to === selectedId) ? 'active-edge' : ''
-      ].filter(Boolean).join(' ')
+      data: { kind: edge.kind },
+      class: edgeClass(edge)
     }));
-    if (!review.nodes.some((node) => node.id === selectedId)) {
-      selectedId = review.nodes.find((node) => node.change)?.id ?? review.nodes[0]?.id ?? '';
-    }
   }
 
   function setView(nextView) {
@@ -265,7 +279,29 @@
   function setScope(nextScope) {
     scope = nextScope;
     selectedId = '';
+    selectedIds = [];
     renderGraph();
+  }
+
+  function edgeClass(edge) {
+    const selected = new Set(selectedIds);
+    return [
+      edge.kind === 'indirect' ? 'indirect-edge' : edge.kind === 'bridge' ? 'bridge-edge' : edge.kind === 'category' ? 'category-edge' : 'code-edge',
+      selected.size > 0 && (selected.has(edge.from) || selected.has(edge.to)) ? 'active-edge' : ''
+    ].filter(Boolean).join(' ');
+  }
+
+  function syncSelectionStyles() {
+    const selected = new Set(selectedIds);
+    nodes = nodes.map((node) => ({ ...node, selected: selected.has(node.id) }));
+    edges = edges.map((edge) => ({
+      ...edge,
+      class: edgeClass({ from: edge.source, to: edge.target, kind: edge.data?.kind ?? 'imports' })
+    }));
+  }
+
+  function uniqueIds(ids) {
+    return [...new Set(ids.filter(Boolean))];
   }
 
   function addActivity(message) {
@@ -320,6 +356,25 @@
     return `${Math.max(8, Math.round((count / timelineMax) * 112))}px`;
   }
 
+  function pluralizeCommit(count) {
+    return `${count} ${count === 1 ? 'commit' : 'commits'}`;
+  }
+
+  function authorBreakdown(authors = []) {
+    if (authors.length === 0) return '';
+    return authors
+      .slice(0, 3)
+      .map((author) => `${author.name} (${author.count})`)
+      .join(', ');
+  }
+
+  function timelineLabel(bucket) {
+    if (!bucket?.count) return '0 commits';
+    const authors = authorBreakdown(bucket.authors ?? []);
+    if (!authors) return pluralizeCommit(bucket.count);
+    return `${pluralizeCommit(bucket.count)} by ${authors}`;
+  }
+
   function relationWidth(node) {
     const max = Math.max(1, selectedCommitCount, ...connectedFiles.map((item) => activityCount(item.activity)));
     return `${Math.max(12, Math.round((activityCount(node.activity) / max) * 100))}%`;
@@ -367,9 +422,28 @@
   }
 
   function handleNodeClick({ node, event }) {
-    selectedId = node.id;
-    renderGraph();
+    const multi = Boolean(event?.shiftKey || event?.metaKey || event?.ctrlKey);
+    if (multi) {
+      selectedIds = selectedIds.includes(node.id)
+        ? selectedIds.filter((id) => id !== node.id)
+        : uniqueIds([...selectedIds, node.id]);
+      selectedId = selectedIds.includes(node.id) ? node.id : selectedIds[0] ?? '';
+    } else {
+      selectedId = node.id;
+      selectedIds = [node.id];
+    }
+    inspectorOpen = true;
+    syncSelectionStyles();
     if ('detail' in event && event.detail >= 2) openNode(node.id);
+  }
+
+  function handleSelectionChange({ nodes: selectedNodes }) {
+    const nextIds = selectedNodes.map((node) => node.id);
+    if (nextIds.join('\0') === selectedIds.join('\0')) return;
+    selectedIds = nextIds;
+    selectedId = selectedIds.includes(selectedId) ? selectedId : selectedIds.at(-1) ?? '';
+    if (selectedIds.length > 0) inspectorOpen = true;
+    syncSelectionStyles();
   }
 
   onMount(() => {
@@ -406,14 +480,14 @@
       <span class="mark"></span>
       <strong>codemap</strong>
       <span>{graph?.repository ?? 'loading repository'}</span>
-      <em>{graph?.branch ?? 'main'}</em>
+      <em>{graph?.baseRevision ? `${graph.branch} vs ${graph.baseRevision}` : graph?.branch ?? 'main'}</em>
     </div>
     <div class="sync" class:online={connected}>
       <span>last sync {formatGeneratedAt(graph?.generatedAt)}</span><i></i>
     </div>
   </header>
 
-  <div class="dashboard">
+  <div class="dashboard" class:inspector-closed={!inspectorOpen}>
     <section class="left-panel">
       <nav class="toolbar" aria-label="Map controls">
         <div class="control-group">
@@ -460,10 +534,12 @@
             bind:edges
             {nodeTypes}
             fitView
-            fitViewOptions={{ padding: 0.22, maxZoom: 0.95 }}
-            minZoom={0.32}
+            fitViewOptions={{ padding: 0.16, maxZoom: 0.85 }}
+            minZoom={0.12}
             maxZoom={1.8}
             onnodeclick={handleNodeClick}
+            onselectionchange={handleSelectionChange}
+            selectionOnDrag
             nodesConnectable={false}
             deleteKey={null}
             proOptions={{ hideAttribution: true }}
@@ -483,19 +559,36 @@
           {#each graph?.activity ?? [] as bucket, index}
             <button
               class:hot={index >= (graph?.activity?.length ?? 0) - 4}
-              title={`${bucket.count} commits`}
+              aria-label={timelineLabel(bucket)}
+              title={timelineLabel(bucket)}
               style={`height: ${barHeight(bucket.count)}`}
             >
-              <span>{bucket.count}</span>
+              <span>{timelineLabel(bucket)}</span>
             </button>
           {/each}
         </div>
       </section>
     </section>
 
+    {#if inspectorOpen}
     <aside>
-      {#if selected}
-        <p class="eyebrow">Building the map</p>
+      <div class="inspector-top">
+        <p class="eyebrow">{selected ? 'Building the map' : 'Repository'}</p>
+        <button class="close-inspector" aria-label="Close details panel" title="Close details panel" onclick={() => inspectorOpen = false}>x</button>
+      </div>
+      {#if selectedCards.length > 1}
+        <h1>{selectedCards.length} files selected</h1>
+        <p class="lead">{selectedChangeCount} changed files and {selectedCardsCommitCount} commits in the selected activity window.</p>
+        <div class="selection-list">
+          {#each selectedCards as item}
+            <button onclick={() => { selectedId = item.id; selectedIds = [item.id]; syncSelectionStyles(); }}>
+              <span>{item.label}</span>
+              <em>{item.change?.status ?? `${activityCount(item.activity)} commits`}</em>
+              <code>{item.id}</code>
+            </button>
+          {/each}
+        </div>
+      {:else if selected}
         <h1>{selected.label}</h1>
         <code>{selected.id}</code>
         <p class="lead">{selectedLead()}</p>
@@ -555,11 +648,11 @@
 
         <button class="open-button" disabled={!selected.openable} onclick={() => openNode(selected.id)}>Open in VS Code</button>
       {:else}
-        <p class="eyebrow">Repository</p>
         <h1>{graph?.repository ?? 'Loading'}</h1>
         <p class="lead">Select a file to inspect activity, recent commits, and code connections.</p>
       {/if}
     </aside>
+    {/if}
   </div>
 </main>
 
@@ -580,7 +673,9 @@
   .sync i { width: 6px; height: 6px; border-radius: 50%; background: #f59e0b; }
   .sync.online i { background: #35d07f; box-shadow: 0 0 14px rgba(53, 208, 127, 0.7); }
   .dashboard { min-height: 0; flex: 1 1 auto; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1fr) minmax(430px, 490px); }
+  .dashboard.inspector-closed { grid-template-columns: minmax(0, 1fr); }
   .left-panel { min-width: 0; min-height: 0; display: grid; grid-template-rows: 46px minmax(0, 1fr) 158px; border-right: 1px solid #172332; overflow: hidden; }
+  .dashboard.inspector-closed .left-panel { border-right: 0; }
   .toolbar { gap: 12px; padding: 0 12px; border-bottom: 1px solid #121d2a; background: #080e15; overflow-x: auto; }
   .control-group { gap: 8px; }
   .control-group > span, .timeline-head span, .eyebrow, h3 { color: #65768a; font: 800 0.62rem ui-monospace, Consolas, monospace; letter-spacing: 0.14em; text-transform: uppercase; white-space: nowrap; }
@@ -603,14 +698,23 @@
   .bars { height: 96px; display: grid; grid-template-columns: repeat(24, minmax(10px, 1fr)); align-items: end; gap: 6px; }
   .bars button { min-width: 0; border: 0; border-radius: 5px 5px 2px 2px; background: #1a2634; cursor: pointer; position: relative; }
   .bars button.hot { background: linear-gradient(180deg, #ff9941, #e7a645); }
-  .bars button span { position: absolute; inset: auto 0 100% 0; color: #708296; font-size: 0.65rem; opacity: 0; }
+  .bars button span { position: absolute; left: 50%; bottom: calc(100% + 6px); z-index: 5; width: max-content; max-width: 220px; transform: translateX(-50%); padding: 5px 7px; border: 1px solid #24364a; border-radius: 5px; background: #0b141e; color: #a8b8c8; font-size: 0.65rem; line-height: 1.25; opacity: 0; pointer-events: none; box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24); }
   .bars button:hover span { opacity: 1; }
   aside { min-width: 0; min-height: 0; overflow-y: auto; background: #080e15; }
   aside > * { margin-left: 22px; margin-right: 22px; }
-  aside .eyebrow { margin-top: 20px; margin-bottom: 8px; }
+  .inspector-top { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0; padding: 14px 18px 8px 22px; background: linear-gradient(180deg, #080e15 72%, rgba(8, 14, 21, 0)); }
+  .inspector-top .eyebrow { margin: 0; }
+  .close-inspector { flex: 0 0 auto; width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid #1d3143; border-radius: 7px; color: #8fa2b5; background: #0b1520; font: 800 0.86rem ui-monospace, Consolas, monospace; line-height: 1; cursor: pointer; }
+  .close-inspector:hover { color: #edf5fb; background: #17283a; }
   aside h1 { margin: 0 22px 4px; color: #eff5fb; font-size: 1.25rem; letter-spacing: 0; overflow-wrap: anywhere; }
   aside code { display: block; color: #607184; overflow-wrap: anywhere; font-size: 0.76rem; }
   .lead { margin-top: 14px; margin-bottom: 18px; color: #a6b4c3; font-size: 0.86rem; line-height: 1.38; }
+  .selection-list { display: grid; gap: 8px; margin-top: 12px; }
+  .selection-list button { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; padding: 10px 11px; border: 1px solid #1d3143; border-radius: 8px; color: #dce7ef; background: #0b1520; text-align: left; cursor: pointer; }
+  .selection-list button:hover { border-color: #3a6f88; background: #101d2a; }
+  .selection-list span { min-width: 0; overflow-wrap: anywhere; font-size: 0.82rem; font-weight: 800; }
+  .selection-list em { color: #f3a33f; font: 800 0.7rem ui-monospace, Consolas, monospace; font-style: normal; white-space: nowrap; }
+  .selection-list code { grid-column: 1 / -1; margin: 0; font-size: 0.68rem; }
   .stat-grid { margin: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid #172332; border-bottom: 1px solid #172332; }
   .stat-grid div { min-width: 0; padding: 16px 18px; border-right: 1px solid #172332; }
   .stat-grid div:last-child { border-right: 0; }

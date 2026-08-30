@@ -100,10 +100,20 @@ func main() {
 }
 
 func runMapCommand(arguments []string) error {
-	if len(arguments) == 0 {
-		return runWebMap()
+	flags := flag.NewFlagSet("gitcs map", flag.ContinueOnError)
+	baseRevision := flags.String("base", "", "Git revision to compare against, such as origin/main")
+	flags.Usage = func() {
+		fmt.Fprintf(flags.Output(), "Usage of %s map [options]\n", os.Args[0])
+		fmt.Fprintf(flags.Output(), "\nOptions:\n")
+		flags.PrintDefaults()
 	}
-	return fmt.Errorf("unknown option %q", strings.Join(arguments, " "))
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unknown option %q", strings.Join(flags.Args(), " "))
+	}
+	return runWebMap(mapOptions{BaseRevision: strings.TrimSpace(*baseRevision)})
 }
 
 type Boundary struct {

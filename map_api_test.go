@@ -183,7 +183,7 @@ func TestBuildMapSnapshotIncludesChangeSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapshot, err := buildMapSnapshot(root, repo, worktree)
+	snapshot, err := buildMapSnapshot(root, repo, worktree, mapOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,6 +207,116 @@ func TestBuildMapSnapshotIncludesChangeSummary(t *testing.T) {
 	}
 	if len(snapshot.Response.Activity) != 24 {
 		t.Fatalf("repository activity buckets = %d, want 24", len(snapshot.Response.Activity))
+	}
+}
+
+func TestBuildMapSnapshotIncludesCommittedChangesAgainstBase(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "app.go"), []byte("package main\n\nfunc Run() {\n\tprintln(1)\n}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := git.PlainInit(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktree.Add("app.go"); err != nil {
+		t.Fatal(err)
+	}
+	baseHash, err := worktree.Commit("initial", &git.CommitOptions{
+		Author: &object.Signature{Name: "tester", Email: "tester@example.com", When: time.Now().Add(-time.Hour)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "app.go"), []byte("package main\n\nfunc Run() {\n\tprintln(2)\n\tprintln(3)\n}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktree.Add("app.go"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktree.Commit("change run", &git.CommitOptions{
+		Author: &object.Signature{Name: "tester", Email: "tester@example.com", When: time.Now()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := buildMapSnapshot(root, repo, worktree, mapOptions{BaseRevision: baseHash.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if snapshot.Response.BaseRevision != baseHash.String() {
+		t.Fatalf("base revision = %q, want %q", snapshot.Response.BaseRevision, baseHash.String())
+	}
+	if snapshot.Response.Clean {
+		t.Fatal("snapshot was clean, want committed changes against base")
+	}
+	var changed *mapNodeResponse
+	for _, node := range snapshot.Response.Nodes {
+		if node.ID == "app.go" {
+			copy := node
+			changed = &copy
+			break
+		}
+	}
+	if changed == nil || changed.Change == nil {
+		t.Fatalf("app.go committed change was not returned: %#v", snapshot.Response.Nodes)
+	}
+	if changed.Change.Status != changeModified {
+		t.Fatalf("change status = %q, want %q", changed.Change.Status, changeModified)
+	}
+	assertContainsAll(t, strings.ToLower(changed.Change.Summary.Changed), []string{"modified", "+2/-1", "run"})
+}
+
+func TestReadMapActivityBucketsIncludesAuthors(t *testing.T) {
+	root := t.TempDir()
+	repo, err := git.PlainInit(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	commits := []struct {
+		content string
+		author  string
+		when    time.Time
+	}{
+		{content: "one", author: "Alice", when: now.AddDate(0, 0, -2)},
+		{content: "two", author: "Bob", when: now.AddDate(0, 0, -1)},
+		{content: "three", author: "Alice", when: now},
+	}
+	for _, commit := range commits {
+		if err := os.WriteFile(filepath.Join(root, "app.go"), []byte(commit.content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := worktree.Add("app.go"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := worktree.Commit(commit.content, &git.CommitOptions{
+			Author: &object.Signature{Name: commit.author, Email: strings.ToLower(commit.author) + "@example.com", When: commit.when},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	buckets := readMapActivityBuckets(repo, now, 2)
+	if len(buckets) != 2 {
+		t.Fatalf("bucket count = %d, want 2", len(buckets))
+	}
+	latest := buckets[1]
+	if latest.Count != 3 {
+		t.Fatalf("latest count = %d, want 3", latest.Count)
+	}
+	wantAuthors := []mapActivityAuthorBucket{{Name: "Alice", Count: 2}, {Name: "Bob", Count: 1}}
+	if !reflect.DeepEqual(latest.Authors, wantAuthors) {
+		t.Fatalf("latest authors = %#v, want %#v", latest.Authors, wantAuthors)
 	}
 }
 

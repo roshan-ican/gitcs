@@ -35,6 +35,16 @@ running `gitcs`. The browser UI has three live views: current relevant changes,
 all source-code connections, and live progress/status as the local watcher
 rebuilds the map.
 
+To review a branch after its commits have already been pushed, compare the map
+against a base revision:
+
+```bash
+gitcs map -base origin/main
+```
+
+That mode shows files changed between the base revision and the current `HEAD`,
+plus any uncommitted working-tree changes.
+
 The basic usage of this tool is to just run it, it will generate a graph of commits from the last 6 months.
 ```bash
 > gitcs -path "/home/user/dev"

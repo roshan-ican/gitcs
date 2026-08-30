@@ -75,14 +75,21 @@ type mapFileActivity struct {
 }
 
 type mapActivityBucket struct {
-	Start time.Time `json:"start"`
-	End   time.Time `json:"end"`
-	Count int       `json:"count"`
+	Start   time.Time                 `json:"start"`
+	End     time.Time                 `json:"end"`
+	Count   int                       `json:"count"`
+	Authors []mapActivityAuthorBucket `json:"authors"`
+}
+
+type mapActivityAuthorBucket struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
 }
 
 type mapResponse struct {
 	Repository   string                   `json:"repository"`
 	Branch       string                   `json:"branch"`
+	BaseRevision string                   `json:"baseRevision,omitempty"`
 	Revision     uint64                   `json:"revision"`
 	GeneratedAt  time.Time                `json:"generatedAt"`
 	Clean        bool                     `json:"clean"`
@@ -139,18 +146,31 @@ type changeEvidence struct {
 	CurrentLineCount  int
 }
 
-func buildMapSnapshot(root string, repo *git.Repository, worktree *git.Worktree) (mapSnapshot, error) {
+func buildMapSnapshot(root string, repo *git.Repository, worktree *git.Worktree, options mapOptions) (mapSnapshot, error) {
 	graph, err := analyzeRepositoryGraph(root)
 	if err != nil {
 		return mapSnapshot{}, err
 	}
 
-	changes, err := readWorkingTreeChanges(worktree)
+	headTree := readHeadTree(repo)
+	baseTree := headTree
+	var committedChanges []reviewChange
+	if options.BaseRevision != "" {
+		baseTree, err = resolveRevisionTree(repo, options.BaseRevision)
+		if err != nil {
+			return mapSnapshot{}, err
+		}
+		committedChanges, err = readCommittedChanges(baseTree, headTree)
+		if err != nil {
+			return mapSnapshot{}, err
+		}
+	}
+	workingTreeChanges, err := readWorkingTreeChanges(worktree)
 	if err != nil {
 		return mapSnapshot{}, err
 	}
+	changes := mergeReviewChanges(committedChanges, workingTreeChanges)
 
-	headTree := readHeadTree(repo)
 	changeByID := make(map[NodeID]reviewChange, len(changes))
 	changeFacts := make(map[NodeID]changeEvidence, len(changes))
 	openTargets := make(map[NodeID]openTarget, len(graph.Nodes)+len(changes))
@@ -165,7 +185,11 @@ func buildMapSnapshot(root string, repo *git.Repository, worktree *git.Worktree)
 		if _, analyzed := graph.Nodes[id]; !analyzed {
 			continue
 		}
-		oldContent := readTreeFile(headTree, string(id))
+		oldPath := change.OldPath
+		if oldPath == "" {
+			oldPath = string(id)
+		}
+		oldContent := readTreeFile(baseTree, oldPath)
 		newContent := readWorktreeFile(absolutePath, change.Status)
 		diff := diffFileLines(oldContent, newContent)
 		touched := touchedGoSymbols(oldContent, diff.OldRanges, newContent, diff.NewRanges)
@@ -314,6 +338,7 @@ func buildMapSnapshot(root string, repo *git.Repository, worktree *git.Worktree)
 		Response: mapResponse{
 			Repository:   filepath.Base(root),
 			Branch:       readBranchName(repo),
+			BaseRevision: options.BaseRevision,
 			GeneratedAt:  generatedAt,
 			Clean:        len(changes) == 0,
 			Nodes:        nodes,
@@ -453,10 +478,43 @@ func readMapActivityBuckets(repo *git.Repository, now time.Time, weeks int) []ma
 		index := int(commit.Author.When.Sub(start).Hours() / 24 / 7)
 		if index >= 0 && index < len(buckets) {
 			buckets[index].Count++
+			buckets[index].Authors = incrementActivityAuthor(buckets[index].Authors, commitAuthorLabel(commit))
 		}
 		return nil
 	})
+	for index := range buckets {
+		sortActivityAuthors(buckets[index].Authors)
+	}
 	return buckets
+}
+
+func commitAuthorLabel(commit *object.Commit) string {
+	if strings.TrimSpace(commit.Author.Name) != "" {
+		return strings.TrimSpace(commit.Author.Name)
+	}
+	if strings.TrimSpace(commit.Author.Email) != "" {
+		return strings.TrimSpace(commit.Author.Email)
+	}
+	return "unknown"
+}
+
+func incrementActivityAuthor(authors []mapActivityAuthorBucket, name string) []mapActivityAuthorBucket {
+	for index := range authors {
+		if authors[index].Name == name {
+			authors[index].Count++
+			return authors
+		}
+	}
+	return append(authors, mapActivityAuthorBucket{Name: name, Count: 1})
+}
+
+func sortActivityAuthors(authors []mapActivityAuthorBucket) {
+	sort.Slice(authors, func(i, j int) bool {
+		if authors[i].Count != authors[j].Count {
+			return authors[i].Count > authors[j].Count
+		}
+		return authors[i].Name < authors[j].Name
+	})
 }
 
 func shortHash(hash string) string {

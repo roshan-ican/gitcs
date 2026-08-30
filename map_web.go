@@ -36,13 +36,18 @@ type mapWebServer struct {
 	repo     *git.Repository
 	worktree *git.Worktree
 	opener   func(string, int) error
+	options  mapOptions
 
 	mu          sync.RWMutex
 	snapshot    mapSnapshot
 	subscribers map[chan mapEvent]struct{}
 }
 
-func runWebMap() error {
+type mapOptions struct {
+	BaseRevision string
+}
+
+func runWebMap(options mapOptions) error {
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("could not find the current folder: %w", err)
@@ -57,7 +62,7 @@ func runWebMap() error {
 	}
 	root := worktree.Filesystem.Root()
 
-	server, err := newMapWebServer(root, repo, worktree, openFileInVSCodeAtLine)
+	server, err := newMapWebServer(root, repo, worktree, openFileInVSCodeAtLine, options)
 	if err != nil {
 		return err
 	}
@@ -105,8 +110,9 @@ func newMapWebServer(
 	repo *git.Repository,
 	worktree *git.Worktree,
 	opener func(string, int) error,
+	options mapOptions,
 ) (*mapWebServer, error) {
-	snapshot, err := buildMapSnapshot(root, repo, worktree)
+	snapshot, err := buildMapSnapshot(root, repo, worktree, options)
 	if err != nil {
 		return nil, fmt.Errorf("build initial repository map: %w", err)
 	}
@@ -116,6 +122,7 @@ func newMapWebServer(
 		repo:        repo,
 		worktree:    worktree,
 		opener:      opener,
+		options:     options,
 		snapshot:    snapshot,
 		subscribers: make(map[chan mapEvent]struct{}),
 	}, nil
@@ -232,7 +239,7 @@ func writeServerEvent(writer io.Writer, name string, event mapEvent) {
 }
 
 func (server *mapWebServer) rebuild() {
-	snapshot, err := buildMapSnapshot(server.root, server.repo, server.worktree)
+	snapshot, err := buildMapSnapshot(server.root, server.repo, server.worktree, server.options)
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	if err != nil {

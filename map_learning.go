@@ -18,8 +18,9 @@ const (
 )
 
 type reviewChange struct {
-	Path   string
-	Status changeStatus
+	Path    string
+	OldPath string
+	Status  changeStatus
 }
 
 type activityCommit struct {
