@@ -18,6 +18,8 @@
   let connected = false;
   let notice = '';
   let inspectorOpen = true;
+  let aiContext = null;
+  let aiContextLoading = false;
   let activityLog = [];
   const viewOptions = [
     { id: 'calls', label: 'What calls what' },
@@ -280,6 +282,7 @@
     scope = nextScope;
     selectedId = '';
     selectedIds = [];
+    aiContext = null;
     renderGraph();
   }
 
@@ -421,6 +424,45 @@
     }
   }
 
+  function selectedContextIds() {
+    if (selectedIds.length > 0) return selectedIds;
+    if (selectedId) return [selectedId];
+    return [];
+  }
+
+  async function buildAIContext() {
+    const ids = selectedContextIds();
+    if (ids.length === 0) {
+      notice = 'Select one or more files first';
+      return;
+    }
+    aiContextLoading = true;
+    try {
+      const response = await fetch('/api/context', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids })
+      });
+      if (!response.ok) throw new Error((await response.text()).trim() || 'Could not build context');
+      aiContext = await response.json();
+      notice = aiContext.truncated ? 'AI context ready; large files were truncated' : 'AI context ready';
+    } catch (error) {
+      notice = error instanceof Error ? error.message : String(error);
+    } finally {
+      aiContextLoading = false;
+    }
+  }
+
+  async function copyAIContext() {
+    if (!aiContext?.prompt) return;
+    try {
+      await navigator.clipboard.writeText(aiContext.prompt);
+      notice = 'Copied AI context';
+    } catch (error) {
+      notice = error instanceof Error ? error.message : String(error);
+    }
+  }
+
   function handleNodeClick({ node, event }) {
     const multi = Boolean(event?.shiftKey || event?.metaKey || event?.ctrlKey);
     if (multi) {
@@ -432,6 +474,7 @@
       selectedId = node.id;
       selectedIds = [node.id];
     }
+    aiContext = null;
     inspectorOpen = true;
     syncSelectionStyles();
     if ('detail' in event && event.detail >= 2) openNode(node.id);
@@ -442,6 +485,7 @@
     if (nextIds.join('\0') === selectedIds.join('\0')) return;
     selectedIds = nextIds;
     selectedId = selectedIds.includes(selectedId) ? selectedId : selectedIds.at(-1) ?? '';
+    aiContext = null;
     if (selectedIds.length > 0) inspectorOpen = true;
     syncSelectionStyles();
   }
@@ -579,9 +623,13 @@
       {#if selectedCards.length > 1}
         <h1>{selectedCards.length} files selected</h1>
         <p class="lead">{selectedChangeCount} changed files and {selectedCardsCommitCount} commits in the selected activity window.</p>
+        <div class="ai-actions">
+          <button onclick={buildAIContext} disabled={aiContextLoading}>{aiContextLoading ? 'Building context...' : 'Understand selection'}</button>
+          <button onclick={copyAIContext} disabled={!aiContext?.prompt}>Copy AI context</button>
+        </div>
         <div class="selection-list">
           {#each selectedCards as item}
-            <button onclick={() => { selectedId = item.id; selectedIds = [item.id]; syncSelectionStyles(); }}>
+            <button onclick={() => { selectedId = item.id; selectedIds = [item.id]; aiContext = null; syncSelectionStyles(); }}>
               <span>{item.label}</span>
               <em>{item.change?.status ?? `${activityCount(item.activity)} commits`}</em>
               <code>{item.id}</code>
@@ -592,6 +640,10 @@
         <h1>{selected.label}</h1>
         <code>{selected.id}</code>
         <p class="lead">{selectedLead()}</p>
+        <div class="ai-actions">
+          <button onclick={buildAIContext} disabled={aiContextLoading}>{aiContextLoading ? 'Building context...' : 'Understand component'}</button>
+          <button onclick={copyAIContext} disabled={!aiContext?.prompt}>Copy AI context</button>
+        </div>
 
         <div class="stat-grid">
           <div><strong>{selectedCommitCount}</strong><span>commits · {period === 'all' ? 'all time' : `${period} days`}</span></div>
@@ -603,7 +655,7 @@
           <h3>Usually changes with</h3>
           <div class="relation-list">
             {#each connectedFiles as item}
-              <button onclick={() => { selectedId = item.id; renderGraph(); }}>
+              <button onclick={() => { selectedId = item.id; selectedIds = [item.id]; aiContext = null; renderGraph(); }}>
                 <span>{item.label}</span>
                 <em>{activityCount(item.activity)} commits</em>
                 <b><i style={`width: ${relationWidth(item)}`}></i></b>
@@ -639,17 +691,24 @@
 
         <h3>Depends on</h3>
         <div class="chips">
-          {#each dependsOn.slice(0, 6) as item}<button onclick={() => { selectedId = item.id; renderGraph(); }}>{item.label}</button>{:else}<span>None detected</span>{/each}
+          {#each dependsOn.slice(0, 6) as item}<button onclick={() => { selectedId = item.id; selectedIds = [item.id]; aiContext = null; renderGraph(); }}>{item.label}</button>{:else}<span>None detected</span>{/each}
         </div>
         <h3>Used by</h3>
         <div class="chips">
-          {#each usedBy.slice(0, 6) as item}<button onclick={() => { selectedId = item.id; renderGraph(); }}>{item.label}</button>{:else}<span>None detected</span>{/each}
+          {#each usedBy.slice(0, 6) as item}<button onclick={() => { selectedId = item.id; selectedIds = [item.id]; aiContext = null; renderGraph(); }}>{item.label}</button>{:else}<span>None detected</span>{/each}
         </div>
 
         <button class="open-button" disabled={!selected.openable} onclick={() => openNode(selected.id)}>Open in VS Code</button>
       {:else}
         <h1>{graph?.repository ?? 'Loading'}</h1>
         <p class="lead">Select a file to inspect activity, recent commits, and code connections.</p>
+      {/if}
+      {#if aiContext}
+        <h3>AI context</h3>
+        <div class="ai-context">
+          <div><strong>{aiContext.title}</strong><span>{aiContext.fileCount} files{aiContext.truncated ? ' · truncated' : ''}</span></div>
+          <pre>{aiContext.prompt}</pre>
+        </div>
       {/if}
     </aside>
     {/if}
@@ -709,6 +768,15 @@
   aside h1 { margin: 0 22px 4px; color: #eff5fb; font-size: 1.25rem; letter-spacing: 0; overflow-wrap: anywhere; }
   aside code { display: block; color: #607184; overflow-wrap: anywhere; font-size: 0.76rem; }
   .lead { margin-top: 14px; margin-bottom: 18px; color: #a6b4c3; font-size: 0.86rem; line-height: 1.38; }
+  .ai-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+  .ai-actions button { min-width: 0; border: 1px solid #1d3143; border-radius: 8px; padding: 9px 10px; color: #dce7ef; background: #102033; font-size: 0.76rem; font-weight: 800; cursor: pointer; }
+  .ai-actions button:first-child { color: #061018; border-color: #6ee7f9; background: #67e8f9; }
+  .ai-actions button:hover:not(:disabled) { filter: brightness(1.08); }
+  .ai-context { display: grid; gap: 10px; padding: 11px; border: 1px solid #1d3143; border-radius: 8px; background: #0b141e; }
+  .ai-context div { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+  .ai-context strong { min-width: 0; color: #e5eef7; font-size: 0.8rem; overflow-wrap: anywhere; }
+  .ai-context span { flex: 0 0 auto; color: #8395a8; font: 0.68rem ui-monospace, Consolas, monospace; }
+  .ai-context pre { max-height: 320px; margin: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #aebed0; font: 0.68rem/1.45 ui-monospace, Consolas, monospace; }
   .selection-list { display: grid; gap: 8px; margin-top: 12px; }
   .selection-list button { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; padding: 10px 11px; border: 1px solid #1d3143; border-radius: 8px; color: #dce7ef; background: #0b1520; text-align: left; cursor: pointer; }
   .selection-list button:hover { border-color: #3a6f88; background: #101d2a; }

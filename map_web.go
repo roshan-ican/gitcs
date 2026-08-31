@@ -131,6 +131,7 @@ func newMapWebServer(
 func (server *mapWebServer) routes() (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/graph", server.handleGraph)
+	mux.HandleFunc("POST /api/context", server.handleContext)
 	mux.HandleFunc("POST /api/open", server.handleOpen)
 	mux.HandleFunc("GET /events", server.handleEvents)
 
@@ -150,6 +151,45 @@ func (server *mapWebServer) handleGraph(response http.ResponseWriter, _ *http.Re
 	response.Header().Set("Cache-Control", "no-store")
 	if err := json.NewEncoder(response).Encode(graph); err != nil {
 		http.Error(response, "could not encode graph", http.StatusInternalServerError)
+	}
+}
+
+func (server *mapWebServer) handleContext(response http.ResponseWriter, request *http.Request) {
+	if !sameOrigin(request) {
+		http.Error(response, "cross-origin request rejected", http.StatusForbidden)
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		http.Error(response, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	var payload struct {
+		IDs []NodeID `json:"ids"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 64*1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil || len(payload.IDs) == 0 {
+		http.Error(response, "invalid context request", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		http.Error(response, "invalid context request", http.StatusBadRequest)
+		return
+	}
+
+	server.mu.RLock()
+	snapshot := server.snapshot
+	server.mu.RUnlock()
+	context, err := buildSelectionContext(server.root, snapshot, payload.IDs)
+	if err != nil {
+		http.Error(response, err.Error(), http.StatusBadRequest)
+		return
+	}
+	response.Header().Set("Content-Type", "application/json; charset=utf-8")
+	response.Header().Set("Cache-Control", "no-store")
+	if err := json.NewEncoder(response).Encode(context); err != nil {
+		http.Error(response, "could not encode context", http.StatusInternalServerError)
 	}
 }
 

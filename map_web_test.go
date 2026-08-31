@@ -118,6 +118,51 @@ func TestOpenHandlerRejectsUnknownCrossOriginAndWrongContentType(t *testing.T) {
 	}
 }
 
+func TestContextHandlerReturnsSelectionPrompt(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "main.go")
+	if err := os.WriteFile(sourcePath, []byte("package main\n\nfunc main() {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := &mapWebServer{
+		root: root,
+		snapshot: mapSnapshot{
+			Response: mapResponse{
+				Repository: "example",
+				Branch:     "main",
+				Nodes: []mapNodeResponse{{
+					ID:          "main.go",
+					Label:       "main.go",
+					Language:    "Go",
+					Description: "Go source file.",
+					Openable:    true,
+				}},
+			},
+			OpenTargets: map[NodeID]openTarget{
+				"main.go": {Path: sourcePath, Openable: true},
+			},
+		},
+		subscribers: make(map[chan mapEvent]struct{}),
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7331/api/context", strings.NewReader(`{"ids":["main.go"]}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://127.0.0.1:7331")
+	recorder := httptest.NewRecorder()
+	server.handleContext(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("context response = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response selectionContextResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.FileCount != 1 || !strings.Contains(response.Prompt, "func main") {
+		t.Fatalf("context response = %#v", response)
+	}
+}
+
 func TestShouldWatchCreatedDirectorySkipsRepositoryInternalsAndBuildOutput(t *testing.T) {
 	root := filepath.Clean(`C:\repo`)
 	tests := []struct {
